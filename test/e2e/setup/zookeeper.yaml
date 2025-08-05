@@ -1,0 +1,34 @@
+apiVersion: zookeeper.kubedoop.dev/v1alpha1
+kind: ZookeeperCluster
+metadata:
+  name: zookeepercluster-sample
+spec:
+  clusterOperation:
+    stopped: false
+  clusterConfig:
+    listenerClass: external-unstable
+  servers:
+    roleGroups:
+      default:
+        replicas: 1
+        config:
+          resources:
+            cpu:
+              min: "400m"
+              max: "800m"
+            memory:
+              limit: "2Gi"
+---
+apiVersion: zookeeper.kubedoop.dev/v1alpha1
+kind: ZookeeperZnode
+metadata:
+  labels:
+    app.kubernetes.io/name: zookeeperznode
+    app.kubernetes.io/instance: zookeeperznode-sample
+    app.kubernetes.io/part-of: zookeeper-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: zookeeper-operator
+  name: kafka-znode
+spec:
+  clusterRef:
+    name: zookeepercluster-sample

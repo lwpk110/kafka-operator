@@ -1,65 +1,22 @@
-# VERSION defines the project version for the bundle.
-# Update this value when you upgrade the version of your project.
-# To re-generate a bundle for another specific version without changing the standard setup, you can:
-# - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
-# - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 0.0.1
+# VERSION refers to the application version.
+VERSION ?= 0.0.0-dev
+# ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
+# The version only effects unit tests.
+# You can find the list of released envtest-k8s versions with `Release envtest` from https://github.com/kubernetes-sigs/controller-tools/releases
+ENVTEST_K8S_VERSION = 1.32.0
 
-# CHANNELS define the bundle channels used in the bundle.
-# Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
-# To re-generate a bundle for other specific channels without changing the standard setup, you can:
-# - use the CHANNELS as arg of the bundle target (e.g make bundle CHANNELS=candidate,fast,stable)
-# - use environment variables to overwrite this value (e.g export CHANNELS="candidate,fast,stable")
-CHANNELS ?= "stable"
-ifneq ($(origin CHANNELS), undefined)
-BUNDLE_CHANNELS := --channels=$(CHANNELS)
-endif
-
-# DEFAULT_CHANNEL defines the default channel used in the bundle.
-# Add a new line here if you would like to change its default config. (E.g DEFAULT_CHANNEL = "stable")
-# To re-generate a bundle for any other default channel without changing the default setup, you can:
-# - use the DEFAULT_CHANNEL as arg of the bundle target (e.g make bundle DEFAULT_CHANNEL=stable)
-# - use environment variables to overwrite this value (e.g export DEFAULT_CHANNEL="stable")
-DEFAULT_CHANNEL ?= "stable"
-ifneq ($(origin DEFAULT_CHANNEL), undefined)
-BUNDLE_DEFAULT_CHANNEL := --default-channel=$(DEFAULT_CHANNEL)
-endif
-BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
-
-# IMAGE_TAG_BASE defines the docker.io namespace and part of the image name for remote images.
-# This variable is used to construct full image tags for bundle and catalog images.
-#
-# For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
-# zncdata.dev/kafka-operator-bundle:$VERSION and zncdata.dev/kafka-operator-catalog:$VERSION.
-
+# REGISTRY refers to the container registry where the image will be pushed.
 REGISTRY ?= quay.io/zncdatadev
+# OCI_REGISTRY refers to the OCI registry where the helm chart will be pushed.
+OCI_REGISTRY ?= oci://quay.io/kubedoopcharts
 PROJECT_NAME = kafka-operator
 
-IMAGE_TAG_BASE ?= $(REGISTRY)/$(PROJECT_NAME)
-
-# BUNDLE_IMG defines the image:tag used for the bundle.
-# You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
-BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
-
-# BUNDLE_GEN_FLAGS are the flags passed to the operator-sdk generate bundle command
-BUNDLE_GEN_FLAGS ?= -q --overwrite --version $(VERSION) $(BUNDLE_METADATA_OPTS)
-
-# USE_IMAGE_DIGESTS defines if images are resolved via tags or digests
-# You can enable this value if you would like to use SHA Based Digests
-# To enable set flag to true
-USE_IMAGE_DIGESTS ?= false
-ifeq ($(USE_IMAGE_DIGESTS), true)
-	BUNDLE_GEN_FLAGS += --use-image-digests
-endif
-
-# Set the Operator SDK version to use. By default, what is installed on the system is used.
-# This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
-OPERATOR_SDK_VERSION ?= v1.34.2
+# Build variables
+BUILD_TIMESTAMP ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+BUILD_COMMIT ?= $(shell git rev-parse HEAD)
 
 # Image URL to use all building/pushing image targets
-IMG ?= $(REGISTRY)/$(PROJECT_NAME):v$(VERSION)
-# ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.26.14
+IMG ?= $(REGISTRY)/$(PROJECT_NAME):$(VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -86,7 +43,7 @@ all: build
 
 # The help target prints out all targets with their descriptions organized
 # beneath their categories. The categories are represented by '##@' and the
-# target descriptions by '##'. The awk commands is responsible for reading the
+# target descriptions by '##'. The awk command is responsible for reading the
 # entire set of makefiles included in this invocation, looking for lines of the
 # file as xyz: ## something, and then pretty-format the target and help. Then,
 # if there's a line with ##@ something, that gets pretty-printed as a category.
@@ -103,7 +60,7 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:generateEmbeddedObjectMeta=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -119,45 +76,89 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./... -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+
+# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
+# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
+# Prometheus and CertManager are installed by default; skip with:
+# - PROMETHEUS_INSTALL_SKIP=true
+# - CERT_MANAGER_INSTALL_SKIP=true
+.PHONY: test-e2e
+test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+	@command -v kind >/dev/null 2>&1 || { \
+		echo "Kind is not installed. Please install Kind manually."; \
+		exit 1; \
+	}
+	@kind get clusters | grep -q 'kind' || { \
+		echo "No Kind cluster is running. Please start a Kind cluster before running the e2e tests."; \
+		exit 1; \
+	}
+	go test ./test/e2e/ -v -ginkgo.v
+
+.PHONY: lint
+lint: golangci-lint ## Run golangci-lint linter
+	$(GOLANGCI_LINT) run
+
+.PHONY: lint-fix
+lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
+	$(GOLANGCI_LINT) run --fix
 
 ##@ Build
 
+LDFLAGS = "-X github.com/zncdatadev/$(PROJECT_NAME)/internal/util/version.BuildVersion=$(VERSION) \
+	-X github.com/zncdatadev/$(PROJECT_NAME)/internal/util/version.GitCommit=$(BUILD_COMMIT) \
+	-X github.com/zncdatadev/$(PROJECT_NAME)/internal/util/version.BuildTime=$(BUILD_TIMESTAMP)"
+
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+	go build -ldflags $(LDFLAGS) -o bin/manager cmd/main.go
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
-# If you wish built the manager image targeting other platforms you can use the --platform flag.
-# (i.e. docker build --platform linux/arm64 ). However, you must enable docker buildKit for it.
+# If you wish to build the manager image targeting other platforms you can use the --platform flag.
+# (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
-docker-build: test ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+docker-build: ## Build docker image with the manager.
+	$(CONTAINER_TOOL) build --build-arg LDFLAGS=$(LDFLAGS) -t ${IMG} .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
-# PLATFORMS defines the target platforms for  the manager image be build to provide support to multiple
+# PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
-# - able to use docker buildx . More info: https://docs.docker.com/build/buildx/
-# - have enable BuildKit, More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# - be able to push the image for your registry (i.e. if you do not inform a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
-# To properly provided solutions that supports more than one platform you should use this option.
+# - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
+# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
+# To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
-docker-buildx: test ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
-	$(CONTAINER_TOOL) buildx use project-v3-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm project-v3-builder
-	rm Dockerfile.cross
+BUILDX_METADATA_FILE ?= docker-digests.json # The file to store the digests of the images built by buildx
+docker-buildx: ## Build and push docker image for the manager for cross-platform support
+	- $(CONTAINER_TOOL) buildx create --name $(PROJECT_NAME)-builder
+	$(CONTAINER_TOOL) buildx use $(PROJECT_NAME)-builder
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg LDFLAGS=$(LDFLAGS) --tag ${IMG}  --metadata-file ${BUILDX_METADATA_FILE}  -f Dockerfile .
+	- $(CONTAINER_TOOL) buildx rm $(PROJECT_NAME)-builder
+
+.PHONY: build-installer
+build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+	mkdir -p dist
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	$(KUSTOMIZE) build config/default > dist/install.yaml
+
+.PHONY: chart ## Generate helm chart for the operator.
+chart: manifests kustomize ## Generate helm chart for the operator.
+	$(KUSTOMIZE) build config/crd > deploy/helm/$(PROJECT_NAME)/crds/crds.yaml
+
+.PHONY: chart-publish ## Publish helm chart for the operator.
+chart-publish: helm chart ## Publish helm chart for the operator.
+	mkdir -p target/charts
+	$(HELM) package deploy/helm/$(PROJECT_NAME) --version $(VERSION) --app-version $(VERSION) --destination target/charts
+	$(HELM) push target/charts/$(PROJECT_NAME)-$(VERSION).tgz $(OCI_REGISTRY)
+
 
 ##@ Deployment
 
@@ -183,10 +184,10 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 	$(KUSTOMIZE) build config/default | kubectl apply --server-side=true -f -
 
 .PHONY: undeploy
-undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
-##@ Build Dependencies
+##@ Dependencies
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -198,186 +199,108 @@ KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
+GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+HELM = $(LOCALBIN)/helm
+KIND = $(LOCALBIN)/kind
 
 ## Tool Versions
-KUSTOMIZE_VERSION ?= v5.4.2
-CONTROLLER_TOOLS_VERSION ?= v0.15.0
+KUSTOMIZE_VERSION ?= v5.6.0
+CONTROLLER_TOOLS_VERSION ?= v0.17.1
+ENVTEST_VERSION ?= release-0.20
+GOLANGCI_LINT_VERSION ?= v2.0.2
+HELM_VERSION ?= v3.17.0
+KIND_VERSION ?= v0.26.0
 
 .PHONY: kustomize
-kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary. If wrong version is installed, it will be removed before downloading.
+kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
-	@if test -x $(LOCALBIN)/kustomize && ! $(LOCALBIN)/kustomize version | grep -q $(KUSTOMIZE_VERSION); then \
-		echo "$(LOCALBIN)/kustomize version is not expected $(KUSTOMIZE_VERSION). Removing it before installing."; \
-		rm -rf $(LOCALBIN)/kustomize; \
-	fi
-	test -s $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) GO111MODULE=on go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
+	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
 
 .PHONY: controller-gen
-controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary. If wrong version is installed, it will be overwritten.
+controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
-	test -s $(LOCALBIN)/controller-gen && $(LOCALBIN)/controller-gen --version | grep -q $(CONTROLLER_TOOLS_VERSION) || \
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
 .PHONY: envtest
-envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
+envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
-	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
 
-.PHONY: operator-sdk
-OPERATOR_SDK ?= $(LOCALBIN)/operator-sdk
-operator-sdk: ## Download operator-sdk locally if necessary.
-ifeq (,$(wildcard $(OPERATOR_SDK)))
-ifeq (, $(shell which operator-sdk 2>/dev/null))
-	@{ \
-	set -e ;\
-	mkdir -p $(dir $(OPERATOR_SDK)) ;\
-	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPERATOR_SDK) https://github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION)/operator-sdk_$${OS}_$${ARCH} ;\
-	chmod +x $(OPERATOR_SDK) ;\
-	}
-else
-OPERATOR_SDK = $(shell which operator-sdk)
-endif
-endif
+.PHONY: golangci-lint
+golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
+$(GOLANGCI_LINT): $(LOCALBIN)
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
-.PHONY: bundle
-bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
-	$(OPERATOR_SDK) generate kustomize manifests -q
-	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
-	$(OPERATOR_SDK) bundle validate ./bundle --select-optional suite=operatorframework --optional-values=k8s-version=1.26
-
-.PHONY: bundle-build
-bundle-build: ## Build the bundle image.
-	docker build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
-
-.PHONY: bundle-push
-bundle-push: ## Push the bundle image.
-	$(MAKE) docker-push IMG=$(BUNDLE_IMG)
-
-
-.PHONY: bundle-buildx
-bundle-buildx: ## Build the bundle image.
-	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
-	$(CONTAINER_TOOL) buildx use project-v3-builder
-	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag $(BUNDLE_IMG) -f bundle.Dockerfile.cross .
-	$(CONTAINER_TOOL) buildx rm project-v3-builder
-
-.PHONY: bundle-run
-bundle-run: ## Run the bundle image.
-	$(OPERATOR_SDK) run bundle $(BUNDLE_IMG)
-
-.PHONY: bundle-cleanup
-bundle-cleanup: ## Clean up the bundle image.
-	$(OPERATOR_SDK) cleanup $(PROJECT_NAME)
-
-OPM_VERSION ?= v1.43.0
-.PHONY: opm
-OPM = ./bin/opm
-opm: ## Download opm locally if necessary.
-ifeq (,$(wildcard $(OPM)))
-ifeq (,$(shell which opm 2>/dev/null))
-	@{ \
-	set -e ;\
-	mkdir -p $(dir $(OPM)) ;\
-	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/$${OPM_VERSION}/$${OS}-$${ARCH}-opm ;\
-	chmod +x $(OPM) ;\
-	}
-else
-OPM = $(shell which opm)
-endif
-endif
-
-# A comma-separated list of bundle images (e.g. make catalog-build BUNDLE_IMGS=example.com/operator-bundle:v0.1.0,example.com/operator-bundle:v0.2.0).
-# These images MUST exist in a registry and be pull-able.
-BUNDLE_IMGS ?= $(BUNDLE_IMG)
-
-# Set CATALOG_BASE_IMG to an existing catalog image tag to add $BUNDLE_IMGS to that image.
-ifneq ($(origin CATALOG_BASE_IMG), undefined)
-FROM_INDEX_OPT := --from-index $(CATALOG_BASE_IMG)
-endif
-
-# Build a catalog image by adding bundle images to an empty catalog using the operator package manager tool, 'opm'.
-# This recipe invokes 'opm' in 'semver' bundle add mode. For more information on add modes, see:
-# https://github.com/operator-framework/community-operators/blob/7f1438c/docs/packaging-operator.md#updating-your-existing-operator
-CATALOG_IMG ?= $(IMAGE_TAG_BASE)-catalog:latest
-
-.PHONY: catalog-build
-catalog-build: opm ## Build a catalog manifests.
-	mkdir -p catalog
-	@if ! test -f ./catalog.Dockerfile; then \
-		$(OPM) generate dockerfile catalog; \
-	fi
-	sed -E "s|(image: ).*-bundle:v$(VERSION)|\1$(BUNDLE_IMG)|g" catalog-template.yaml | \
-	$(OPM) alpha render-template basic -o yaml > catalog/catalog.yaml
-
-.PHONY: catalog-validate
-catalog-validate: opm ## Validate a catalog manifests.
-	$(OPM) validate catalog
-
-#.PHONY: catalog-render
-#catalog-render: opm ## render a bundle to catalog.
-#	$(OPM) render $(BUNDLE_IMGS) --output=yaml >> catalog/catalog.yaml
-
-.PHONY: catalog-docker-build
-catalog-docker-build: ## Build a catalog image.
-	$(CONTAINER_TOOL) build -t ${CATALOG_IMG} -f catalog.Dockerfile .
-
-# Push the catalog image.
-.PHONY: catalog-docker-push
-catalog-docker-push: ## Push a catalog image.
-	$(MAKE) docker-push IMG=$(CATALOG_IMG)
-
-.PHONY: catalog-docker-buildx
-catalog-docker-buildx: ## Build and push a catalog image for cross-platform support
-	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
-	$(CONTAINER_TOOL) buildx use project-v3-builder
-	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) -f catalog.Dockerfile --tag ${CATALOG_IMG} .
-	$(CONTAINER_TOOL) buildx rm project-v3-builder
-
-##@ E2E
-
-# kind
-KIND_VERSION ?= v0.23.0
-
-KINDTEST_K8S_VERSION ?= 1.26.14
-
-KIND_IMAGE ?= kindest/node:v${KINDTEST_K8S_VERSION}
-
-KIND_KUBECONFIG ?= ./kind-kubeconfig-$(KINDTEST_K8S_VERSION)
-KIND_CLUSTER_NAME ?= ${PROJECT_NAME}-$(KINDTEST_K8S_VERSION)
+.PHONY: helm
+helm: $(HELM) ## Download helm locally if necessary.
+$(HELM): $(LOCALBIN)
+	$(call go-install-tool,$(HELM),helm.sh/helm/v3/cmd/helm,$(HELM_VERSION))
 
 .PHONY: kind
-KIND = $(LOCALBIN)/kind
-kind: ## Download kind locally if necessary.
-ifeq (,$(shell which $(KIND)))
-ifeq (,$(shell which kind 2>/dev/null))
-	@{ \
-	set -e ;\
-	go install sigs.k8s.io/kind@$(KIND_VERSION) ;\
-	}
-KIND = $(GOBIN)/bin/kind
-else
-KIND = $(shell which kind)
-endif
+kind: $(KIND) ## Download helm locally if necessary.
+$(KIND): $(LOCALBIN)
+	$(call go-install-tool,$(KIND),sigs.k8s.io/kind,$(KIND_VERSION))
+
+# go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
+# $1 - target path with name of binary
+# $2 - package url which can be installed
+# $3 - specific version of package
+define go-install-tool
+@[ -f "$(1)-$(3)" ] || { \
+set -e; \
+package=$(2)@$(3) ;\
+echo "Downloading $${package}" ;\
+rm -f $(1) || true ;\
+GOBIN=$(LOCALBIN) go install $${package} ;\
+mv $(1) $(1)-$(3) ;\
+} ;\
+ln -sf $(1)-$(3) $(1)
+endef
+
+HELM_DEPENDS ?= commons-operator listener-operator secret-operator zookeeper-operator
+TEST_NAMESPACE = kubedoop-operators
+
+.PHONY: helm-install-depends
+helm-install-depends: helm ## Install the helm chart depends.
+	$(HELM) repo add kubedoop https://zncdatadev.github.io/kubedoop-helm-charts/
+ifneq ($(strip $(HELM_DEPENDS)),)
+	for dep in $(HELM_DEPENDS); do \
+		$(HELM) upgrade --install --create-namespace --namespace $(TEST_NAMESPACE) --wait $$dep kubedoop/$$dep --version $(VERSION); \
+	done
 endif
 
-OLM_VERSION ?= v0.28.0
+## helm uninstall depends
+.PHONY: helm-uninstall-depends
+helm-uninstall-depends: helm ## Uninstall the helm chart depends.
+ifneq ($(strip $(HELM_DEPENDS)),)
+	for dep in $(HELM_DEPENDS); do \
+		$(HELM) uninstall --namespace $(TEST_NAMESPACE) $$dep; \
+	done
+endif
+
+##@ Chainsaw-E2E
+
+# Tool Versions
+# KIND_K8S_VERSION refers to the version of k8s to be used by kind.
+# The version only effects e2e tests.
+# When run `make kind-create`, the version of k8s will be used to create the kind cluster,
+# and the target kubeconfig file will be named as `./kind-kubeconfig-$(KIND_K8S_VERSION)`.
+# So if you want to use the target cluster, to run `export KUBECONFIG=./kind-kubeconfig-$(KIND_K8S_VERSION)`.
+KIND_K8S_VERSION ?= 1.26.15
+CHAINSAW_VERSION ?= v0.2.12
+PRODUCT_VERSION ?= 3.7.1
+
+KIND_IMAGE ?= kindest/node:v${KIND_K8S_VERSION}
+KIND_KUBECONFIG ?= ./kind-kubeconfig-$(KIND_K8S_VERSION)
+KIND_CLUSTER_NAME ?= ${PROJECT_NAME}-$(KIND_K8S_VERSION)
 KIND_CONFIG ?= test/e2e/kind-config.yaml
 
-# Create a kind cluster, install ingress-nginx, and wait for it to be available.
+CHAINSAW = $(LOCALBIN)/chainsaw
+
+# Create a kind cluster
 .PHONY: kind-create
 kind-create: kind ## Create a kind cluster.
 	$(KIND) create cluster --config $(KIND_CONFIG) --image $(KIND_IMAGE) --name $(KIND_CLUSTER_NAME) --kubeconfig $(KIND_KUBECONFIG) --wait 120s
-	KUBECONFIG=$(KIND_KUBECONFIG) make kind-setup
-
-.PHONY: kind-setup
-kind-setup: kind ## setup kind cluster base environment
-	@echo "\nSetup kind cluster base environment, install ingress-nginx and OLM"
-	kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
-	kubectl -n ingress-nginx wait deployment ingress-nginx-controller --for=condition=available --timeout=300s
-	curl -sSL https://github.com/operator-framework/operator-lifecycle-manager/releases/download/$(OLM_VERSION)/install.sh | bash -s $(OLM_VERSION)
 
 .PHONY: kind-delete
 kind-delete: kind ## Delete a kind cluster.
@@ -385,40 +308,43 @@ kind-delete: kind ## Delete a kind cluster.
 
 # chainsaw
 
-CHAINSAW_VERSION ?= v0.1.8
-
+# Use `grep 0.2.6 > /dev/null` instead of `grep -q 0.2.6`. It will not be able to determine the version number,
+# although the execution in the shell is normal, but in the makefile does fail to understand the mechanism in the makefile
+# The operation ends by using `touch` to change the time of the file so that its timestamp is further back than the directory,
+# so that no subsequent logic is performed after the `chainsaw` check is successful in relying on the `$(CHAINSAW)` target.
 .PHONY: chainsaw
-CHAINSAW = $(LOCALBIN)/chainsaw
-chainsaw: ## Download chainsaw locally if necessary.
-ifeq (,$(shell which $(CHAINSAW)))
-ifeq (,$(shell which chainsaw 2>/dev/null))
+chainsaw: $(CHAINSAW) ## Download chainsaw locally if necessary.
+$(CHAINSAW): $(LOCALBIN)
 	@{ \
-	set -e ;\
-	go install github.com/kyverno/chainsaw@$(CHAINSAW_VERSION) ;\
+	set -xe ;\
+	if test -x $(LOCALBIN)/chainsaw && ! $(LOCALBIN)/chainsaw version | grep $(CHAINSAW_VERSION:v%=%) > /dev/null; then \
+		echo "$(LOCALBIN)/chainsaw version is not expected $(CHAINSAW_VERSION). Removing it before installing."; \
+		rm -rf $(LOCALBIN)/chainsaw; \
+	fi; \
+	if test ! -s $(LOCALBIN)/chainsaw; then \
+		mkdir -p $(dir $(CHAINSAW)) ;\
+		TMP=$(shell mktemp -d) ;\
+		OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
+		curl -sSL https://github.com/kyverno/chainsaw/releases/download/$(CHAINSAW_VERSION)/chainsaw_$${OS}_$${ARCH}.tar.gz | tar -xz -C $$TMP ;\
+		mv $$TMP/chainsaw $(CHAINSAW) ;\
+		rm -rf $$TMP ;\
+		chmod +x $(CHAINSAW) ;\
+		touch $(CHAINSAW) ;\
+	fi; \
 	}
-CHAINSAW = $(GOBIN)/chainsaw
-else
-CHAINSAW = $(shell which chainsaw)
-endif
-endif
 
-# chainsaw setup logical
-# - Build the operator docker image
-# - Load the operator docker image into the kind cluster. When create
-#   operator deployment, it will use the image in the kind cluster.
-# - Rebuild the bundle. If override VERSION / REGISTRY or other variables,
-#   we need to rebuild the bundle to use the new image, or other changes.
 .PHONY: chainsaw-setup
-chainsaw-setup: manifests kustomize ## Run the chainsaw setup
-	@echo "\nSetup chainsaw test environment"
+chainsaw-setup: ## Run the chainsaw setup
 	make docker-build
 	$(KIND) --name $(KIND_CLUSTER_NAME) load docker-image $(IMG)
+	KUBECONFIG=$(KIND_KUBECONFIG) make helm-install-depends
 	KUBECONFIG=$(KIND_KUBECONFIG) make deploy
 
 .PHONY: chainsaw-test
 chainsaw-test: chainsaw ## Run the chainsaw test
-	$(CHAINSAW) test --cluster cluster-1=$(KIND_KUBECONFIG) --test-dir ./test/e2e
+	echo "product_version: $(PRODUCT_VERSION)" | KUBECONFIG=$(KIND_KUBECONFIG) $(CHAINSAW) test --cluster cluster-1=$(KIND_KUBECONFIG) --test-dir ./test/e2e/ --values -
 
 .PHONY: chainsaw-cleanup
-chainsaw-cleanup: manifests kustomize ## Run the chainsaw cleanup
+chainsaw-cleanup: ## Run the chainsaw cleanup
+	KUBECONFIG=$(KIND_KUBECONFIG) make helm-uninstall-depends
 	KUBECONFIG=$(KIND_KUBECONFIG) make undeploy
